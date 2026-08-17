@@ -350,28 +350,6 @@ async function handleMessage(message) {
       };
     }
 
-    case "FEE_ESTIMATE": {
-      const settings = await getSettings();
-      if (!settings.bridgeToken) {
-        throw new Error("Browser extension is not paired. Use Pair browser from the Gate Keepa tray app.");
-      }
-      const marketplaceId = message.marketplaceId || settings.marketplaceId;
-      const response = await fetch(`${settings.bridgeUrl.replace(/\/$/, "")}/fees`, {
-        method: "POST",
-        headers: bridgeHeaders(settings, true),
-        body: JSON.stringify({
-          asin: message.asin,
-          marketplaceId,
-          price: Number(message.price),
-          shipping: Number(message.shipping || 0),
-          isAmazonFulfilled: Boolean(message.isAmazonFulfilled)
-        })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `Bridge HTTP ${response.status}`);
-      return { ok: true, result: payload.result };
-    }
-
     case "GIST_PUSH":
       return { ok: true, ...(await gistPush()) };
 
