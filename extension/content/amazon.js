@@ -21,12 +21,6 @@
       <button class="sc-mini" id="sc-amz-keepa">Open Keepa</button>
       <button class="sc-mini" id="sc-amz-bookmark">☆ Watch</button>
     </div>
-    <div class="sc-line">
-      <label>Price ${marketplace.currencySymbol}<input id="sc-fee-price" type="number" min="0" step="0.01"></label>
-      <label><input id="sc-fee-fba" type="checkbox"> FBA</label>
-      <button class="sc-mini" id="sc-fee">Fees</button>
-      <span id="sc-fee-result"></span>
-    </div>
     <div class="sc-line" style="display:block">
       <label for="sc-note">Notes</label>
       <textarea id="sc-note" placeholder="Local note for this ASIN"></textarea>
@@ -67,27 +61,6 @@
       map[asin] = { text: e.target.value, updatedAt: Date.now(), title, marketplaceId };
       await chrome.runtime.sendMessage({ type: "SET_STATE", state: { notes: map } });
     }, 350);
-  });
-
-  panel.querySelector("#sc-fee").addEventListener("click", async () => {
-    const output = panel.querySelector("#sc-fee-result");
-    const price = Number(panel.querySelector("#sc-fee-price").value);
-    if (!Number.isFinite(price) || price <= 0) {
-      output.textContent = "enter price";
-      return;
-    }
-    output.textContent = "…";
-    const response = await chrome.runtime.sendMessage({
-      type: "FEE_ESTIMATE",
-      asin,
-      marketplaceId,
-      price,
-      shipping: 0,
-      isAmazonFulfilled: panel.querySelector("#sc-fee-fba").checked
-    });
-    output.textContent = response?.ok
-      ? `fees ${response.result?.totalFees?.amount ?? "?"} ${response.result?.totalFees?.currency || marketplace.currency}`
-      : (response?.error || "fee lookup failed");
   });
 
   const status = panel.querySelector("#sc-amz-status");
