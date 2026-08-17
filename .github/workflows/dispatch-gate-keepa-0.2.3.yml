@@ -1,4 +1,4 @@
-name: Dispatch Gate Keepa 0.2.3 signed build
+name: Publish Gate Keepa 0.2.3 signed release
 
 on:
   push:
@@ -8,13 +8,50 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  contents: write
 
 jobs:
-  dispatch:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch signed release build
+      - name: Dispatch signed Gate Keepa build
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run gate-keepa-build.yml --repo "$GITHUB_REPOSITORY" --ref main
+
+      - name: Wait for signed build and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: gate-keepa-v0.2.3
+          VERSION: 0.2.3
+          RELEASE_TARGET: b59822e33f334287ec71ed1b78d11a06a7163649
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 8
+          RUN_ID=""
+          for attempt in $(seq 1 24); do
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow gate-keepa-build.yml --event workflow_dispatch --branch main --limit 5 --json databaseId,status,createdAt --jq '.[0].databaseId // empty')
+            if [ -n "$RUN_ID" ]; then break; fi
+            sleep 5
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "Could not locate dispatched Gate Keepa build" >&2
+            exit 1
+          fi
+          echo "Watching Gate Keepa build run $RUN_ID"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+
+          rm -rf release
+          mkdir release
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "GateKeepa-Windows-$VERSION" --dir release
+          (cd release && sha256sum -c SHA256.txt)
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" release/GateKeepa-Setup-$VERSION.exe release/SHA256.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_TARGET" \
+            --title "Gate Keepa $VERSION" \
+            --notes $'Security-hardening release.\n\n- Replaces the localhost HTTP bridge with Firefox Native Messaging\n- Removes browser pairing and localhost HTTP permissions\n- Enforces HTTPS/TLS 1.2+ for Amazon-bound traffic and rejects non-TLS redirects\n- Keeps Amazon client secret and refresh token in Windows Credential Manager\n- Removes optional Gist sync and its browser-stored token\n- Sends only reduced Listings Restrictions fields to Firefox instead of raw Amazon responses\n- Adds an advisory LWA client-secret rotation reminder\n- SP-API scope remains Listings Restrictions / Product Listing only; Product Fees/Pricing are out of scope\n\nThe Windows executable is not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.'
