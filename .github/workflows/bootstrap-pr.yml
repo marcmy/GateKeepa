@@ -1,0 +1,27 @@
+name: Run Gate Keepa Bootstrap
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Execute bootstrap migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCRIPT="$RUNNER_TEMP/gate-keepa-bootstrap.sh"
+          sed -n '/^        run: |$/,$p' .github/workflows/bootstrap-gate-keepa.yml \
+            | tail -n +2 \
+            | sed 's/^          //' > "$SCRIPT"
+          test -s "$SCRIPT"
+          bash "$SCRIPT"
