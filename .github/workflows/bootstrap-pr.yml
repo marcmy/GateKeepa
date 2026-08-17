@@ -24,4 +24,30 @@ jobs:
             | tail -n +2 \
             | sed 's/^          //' > "$SCRIPT"
           test -s "$SCRIPT"
+
+          # GITHUB_TOKEN cannot add/delete workflow files. Strip those operations
+          # from the extracted migration; ChatGPT will stage the final workflow
+          # on the migration branch through the GitHub connector afterward.
+          python - "$SCRIPT" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              'cp "$SOURCE/.github/workflows/sourcing-cockpit-build.yml" .github/workflows/gate-keepa-build.yml\n',
+              ''
+          )
+          start_marker = '# Standalone-repo workflow paths and names.'
+          end_line = 'Path(".github/workflows/bootstrap-gate-keepa.yml").unlink()'
+          start = text.find(start_marker)
+          end = text.find(end_line)
+          if start >= 0 and end >= start:
+              end += len(end_line)
+              while end < len(text) and text[end] in '\r\n':
+                  end += 1
+              text = text[:start] + text[end:]
+          path.write_text(text, encoding="utf-8")
+          PY
+
           bash "$SCRIPT"
