@@ -1,0 +1,62 @@
+name: Ensure Gate Keepa 0.2.2 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ensure-release-0.2.2.yml"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: gate-keepa-v0.2.2
+      RELEASE_RUN: "32075567424"
+      INSTALLER_SHA256: cd9a41211baba7bf85b326266220dd2440c28d19174f229768ca4f0539c9c8cf
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Ensure release exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            mkdir release
+            gh run download "$RELEASE_RUN" --repo "$GITHUB_REPOSITORY" --name GateKeepa-Windows-0.2.2 --dir release
+            (cd release && sha256sum -c SHA256.txt)
+            gh release create "$TAG" release/GateKeepa-Setup-0.2.2.exe release/SHA256.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target 80cbee0fbb6bf9ee55ac14c0bfe8096ce84657c2 \
+              --title "Gate Keepa 0.2.2" \
+              --notes $'Standalone Gate Keepa release.\n\n- Seller-specific Amazon Listings Restrictions / gating checks via SP-API\n- Requires the Product Listing role only; Pricing/Product Fees are deliberately out of scope\n- Mozilla-signed Firefox extension bundled in the Windows installer\n- One-time localhost browser pairing, with Firefox preferred explicitly\n- Windows helper stores Amazon secrets and the bridge token in Windows Credential Manager\n\nThe Windows executable is not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.'
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,name,isDraft,isPrerelease --jq '.'
+
+      - name: Record release manifest
+        shell: bash
+        run: |
+          cat > RELEASES.md <<EOF
+          # Gate Keepa releases
+
+          ## 0.2.2
+
+          - GitHub tag: \`gate-keepa-v0.2.2\`
+          - Signed build workflow run: \`32075567424\`
+          - End-user artifact: \`GateKeepa-Windows-0.2.2\`
+          - Installer: \`GateKeepa-Setup-0.2.2.exe\`
+          - Installer SHA-256: \`$INSTALLER_SHA256\`
+          - Amazon SP-API scope: Listings Restrictions; **Product Listing** role only
+          - Product Fees / Pricing role: deliberately out of scope
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add RELEASES.md
+          git diff --cached --quiet && exit 0
+          git commit -m "Record Gate Keepa 0.2.2 release"
+          git push
