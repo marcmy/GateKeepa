@@ -18,8 +18,8 @@ It does not contain SourceLens code, assets, or proprietary scoring logic.
 | Meltable / hazmat flags | Partial | Keyword warnings only; deliberately labeled heuristic |
 | Similar Product finder | Implemented | Keepa title-keyword search helper |
 | Rabbit Trail finder | Implemented | Amazon narrow search helper |
-| Amazon product page tools | Implemented | Eligibility, bookmark, note, Keepa jump, fees |
-| Product fee estimate | Implemented | Official SP-API Product Fees endpoint |
+| Amazon product page tools | Implemented | Eligibility, bookmark, note, Keepa jump |
+| Product fee estimate | Out of scope | Deliberately omitted; Gate Keepa does not use Product Fees or require the Pricing role |
 | Pomodoro timer | Implemented | 25-minute in-page timer |
 | Gist team sync | Implemented | Optional private Gist; no application backend |
 | Regional Buy Box map / 8-region sweep | Not implemented | Would require reliable location-specific offer capture; not faked |
