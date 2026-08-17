@@ -1,10 +1,7 @@
 name: Dispatch Gate Keepa 0.2.2 release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/dispatch-release-0.2.2.yml"
+  workflow_dispatch:
 
 permissions:
   actions: write
