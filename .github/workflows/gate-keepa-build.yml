@@ -89,7 +89,7 @@ jobs:
             }
           }
           if (-not $background.Contains('connectNative')) { throw 'Extension does not use runtime.connectNative.' }
-          foreach ($needle in @('ThreadingHTTPServer', 'start_browser_pairing', 'local_health_payload', 'bridge_token')) {
+          foreach ($needle in @('ThreadingHTTPServer', 'start_browser_pairing', 'local_health_payload', 'serve_forever')) {
             if ($helper.Contains($needle)) { throw "Legacy localhost helper code remains: $needle" }
           }
           if (-not $spapi.Contains('minimum_version = ssl.TLSVersion.TLSv1_2')) {
