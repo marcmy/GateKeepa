@@ -1,0 +1,20 @@
+name: Dispatch Gate Keepa 0.2.2 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/dispatch-release-0.2.2.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch signed Gate Keepa build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run gate-keepa-build.yml --repo "$GITHUB_REPOSITORY" --ref main
