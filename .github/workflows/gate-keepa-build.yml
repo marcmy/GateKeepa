@@ -41,6 +41,10 @@ jobs:
           if ($manifest.version -ne $version) {
             throw "Version mismatch: helper=$version extension=$($manifest.version)"
           }
+          $spapi = Select-String -Path spapi.py -Pattern '^APP_VERSION = "([^"]+)"$'
+          if (-not $spapi -or $spapi.Matches[0].Groups[1].Value -ne $version) {
+            throw "Version mismatch between helper and spapi.py"
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Gate Keepa version: $version"
 
@@ -50,26 +54,61 @@ jobs:
       - name: Compile Python sources
         run: |
           python -m py_compile helper.py
-          python -m py_compile bridge/server.py
+          python -m py_compile spapi.py
+          python -m py_compile native_host.py
 
-      - name: Run bridge unit tests
-        shell: pwsh
-        run: |
-          Push-Location bridge
-          python -m unittest test_server.py
-          Pop-Location
+      - name: Run security and native messaging unit tests
+        run: python -m unittest test_spapi.py test_native_host.py
 
       - name: Verify restriction-only SP-API scope
         shell: pwsh
         run: |
-          $server = Get-Content bridge/server.py -Raw
+          $spapi = Get-Content spapi.py -Raw
           $background = Get-Content extension/background.js -Raw
           $amazon = Get-Content extension/content/amazon.js -Raw
-          foreach ($needle in @('fee_estimate', 'PriceToEstimateFees', 'parsed.path == "/fees"', '_fees_gate')) {
-            if ($server.Contains($needle)) { throw "Product Fees functionality remains in bridge: $needle" }
+          foreach ($needle in @('fee_estimate', 'PriceToEstimateFees', '/fees', '_fees_gate', 'FEE_ESTIMATE')) {
+            if ($spapi.Contains($needle) -or $background.Contains($needle) -or $amazon.Contains($needle)) {
+              throw "Product Fees functionality is out of scope but found: $needle"
+            }
           }
-          if ($background.Contains('case "FEE_ESTIMATE"')) { throw 'Product Fees functionality remains in extension background.' }
-          if ($amazon.Contains('FEE_ESTIMATE') -or $amazon.Contains('sc-fee')) { throw 'Product Fees UI remains on Amazon content page.' }
+
+      - name: Verify transport security model
+        shell: pwsh
+        run: |
+          $manifest = Get-Content extension/manifest.json -Raw | ConvertFrom-Json
+          if (-not ($manifest.permissions -contains 'nativeMessaging')) {
+            throw 'Firefox nativeMessaging permission is missing.'
+          }
+          $manifestRaw = Get-Content extension/manifest.json -Raw
+          $background = Get-Content extension/background.js -Raw
+          $helper = Get-Content helper.py -Raw
+          $spapi = Get-Content spapi.py -Raw
+          foreach ($needle in @('http://127.0.0.1', 'http://localhost', 'PAIR_BRIDGE', 'bridgeToken')) {
+            if ($manifestRaw.Contains($needle) -or $background.Contains($needle)) {
+              throw "Legacy localhost transport remains in extension: $needle"
+            }
+          }
+          if (-not $background.Contains('connectNative')) { throw 'Extension does not use runtime.connectNative.' }
+          foreach ($needle in @('ThreadingHTTPServer', 'start_browser_pairing', 'local_health_payload', 'serve_forever')) {
+            if ($helper.Contains($needle)) { throw "Legacy localhost helper code remains: $needle" }
+          }
+          if (-not $spapi.Contains('minimum_version = ssl.TLSVersion.TLSv1_2')) {
+            throw 'TLS 1.2 minimum is not enforced in SP-API transport.'
+          }
+          if (-not $spapi.Contains('Gate Keepa refuses non-TLS Amazon API requests')) {
+            throw 'HTTPS-only request guard is missing.'
+          }
+
+      - name: Verify native host manifest
+        shell: pwsh
+        run: |
+          $native = Get-Content native-messaging/com.marcmy.gatekeepa.json -Raw | ConvertFrom-Json
+          if ($native.name -ne 'com.marcmy.gatekeepa') { throw 'Native host name mismatch.' }
+          if ($native.type -ne 'stdio') { throw 'Native host must use stdio.' }
+          if ($native.path -ne 'GateKeepaNativeHost.exe') { throw 'Native host executable mismatch.' }
+          if (-not ($native.allowed_extensions -contains 'sourcing-cockpit@marcmy.github.io')) {
+            throw 'Firefox add-on ID is not allow-listed by native host.'
+          }
 
       - name: Build standalone helper
         shell: pwsh
@@ -79,13 +118,23 @@ jobs:
             throw 'GateKeepa.exe was not produced.'
           }
 
-      - name: Smoke-test frozen helper
+      - name: Build native messaging host
         shell: pwsh
         run: |
-          $exe = Join-Path $PWD 'dist/GateKeepa.exe'
-          $process = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru -Wait
-          if ($process.ExitCode -ne 0) {
-            throw "Frozen Gate Keepa helper exited with code $($process.ExitCode)."
+          python -m PyInstaller --noconfirm --clean GateKeepaNativeHost.spec
+          if (-not (Test-Path dist/GateKeepaNativeHost.exe)) {
+            throw 'GateKeepaNativeHost.exe was not produced.'
+          }
+
+      - name: Smoke-test frozen executables
+        shell: pwsh
+        run: |
+          foreach ($name in @('GateKeepa.exe', 'GateKeepaNativeHost.exe')) {
+            $exe = Join-Path $PWD "dist/$name"
+            $process = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru -Wait
+            if ($process.ExitCode -ne 0) {
+              throw "$name smoke test exited with code $($process.ExitCode)."
+            }
           }
 
       - name: Set up Node.js
@@ -93,7 +142,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Validate Chromium extension JavaScript
+      - name: Validate Chromium-source JavaScript
         shell: pwsh
         run: |
           Get-ChildItem extension -Recurse -Filter *.js | ForEach-Object {
@@ -109,7 +158,6 @@ jobs:
           Remove-Item $firefox -Recurse -Force -ErrorAction SilentlyContinue
           New-Item $firefox -ItemType Directory -Force | Out-Null
           Copy-Item "$source/*" $firefox -Recurse -Force
-
           Get-ChildItem $firefox -Recurse -Filter *.js | ForEach-Object {
             $text = Get-Content $_.FullName -Raw
             $text = $text.Replace('chrome.', 'browser.')
@@ -198,6 +246,8 @@ jobs:
           name: GateKeepa-Developer-${{ steps.version.outputs.version }}
           path: |
             dist/GateKeepa.exe
+            dist/GateKeepaNativeHost.exe
             dist/installer/GateKeepa-Setup-${{ steps.version.outputs.version }}.exe
+            native-messaging/com.marcmy.gatekeepa.json
             build/firefox/*
           if-no-files-found: error

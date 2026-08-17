@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.2"
+  #define MyAppVersion "0.2.3"
 #endif
 #ifndef RepoRoot
   #define RepoRoot ".."
@@ -28,7 +28,12 @@ Name: "startup"; Description: "Start Gate Keepa automatically when I sign in"; G
 
 [Files]
 Source: "{#RepoRoot}\dist\GateKeepa.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\dist\GateKeepaNativeHost.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\native-messaging\com.marcmy.gatekeepa.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\build\firefox\GateKeepa.xpi"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+[Registry]
+Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\com.marcmy.gatekeepa"; ValueType: string; ValueName: ""; ValueData: "{app}\com.marcmy.gatekeepa.json"; Flags: uninsdeletekey
 
 [Icons]
 Name: "{group}\Gate Keepa"; Filename: "{app}\GateKeepa.exe"; Parameters: "--configure"

@@ -8,11 +8,10 @@
 <body>
   <main>
     <h1>Gate Keepa</h1>
-    <p>Amazon credentials live in the localhost helper, not in this extension.</p>
+    <p>Amazon credentials stay in the installed Windows helper. Firefox communicates with it through Firefox Native Messaging; Gate Keepa no longer opens a localhost HTTP port.</p>
 
     <section>
-      <h2>Amazon / helper</h2>
-      <label>Bridge URL <input id="bridgeUrl"></label>
+      <h2>Amazon / native host</h2>
       <label>Marketplace
         <select id="marketplaceId">
           <option value="ATVPDKIKX0DER">US — ATVPDKIKX0DER</option>
@@ -33,16 +32,8 @@
       <label>Eligibility cache TTL (hours) <input id="cacheTtlHours" type="number" min="1"></label>
       <label class="check"><input id="autoScan" type="checkbox"> Auto-scan Keepa rows</label>
       <div class="row">
-        <button id="health">Test helper</button><span id="healthResult"></span>
+        <button id="health">Test native host</button><span id="healthResult"></span>
       </div>
-    </section>
-
-    <section>
-      <h2>GitHub Gist team sync (optional)</h2>
-      <label class="check"><input id="gistSyncEnabled" type="checkbox"> Enable Gist sync</label>
-      <label>Gist ID <input id="gistId" placeholder="blank = create on first push"></label>
-      <label>GitHub token <input id="gistToken" type="password" autocomplete="off"></label>
-      <p class="hint">Use the minimum token permission required for Gists. The token is stored locally by your browser. Firefox asks for the optional data-sharing permission only if you enable this feature.</p>
     </section>
 
     <section>

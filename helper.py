@@ -6,18 +6,15 @@ import json
 import logging
 import os
 import platform
-import secrets
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
 from datetime import datetime, timezone
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -27,13 +24,13 @@ from PIL import Image, ImageDraw
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from bridge.server import Config, Handler, SpApiClient
+from spapi import Config, SpApiClient
 
 
 APP_NAME = "Gate Keepa"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 SERVICE_NAME = "SourcingCockpit"
-DEFAULT_PORT = 8765
+NATIVE_HOST_NAME = "com.marcmy.gatekeepa"
 AMAZON_SETUP_DOCS = "https://developer-docs.amazon.com/sp-api/docs/self-authorization"
 UPDATE_API = "https://api.github.com/repos/marcmy/GateKeepa/releases?per_page=50"
 UPDATE_TAG_PREFIX = "gate-keepa-v"
@@ -51,6 +48,7 @@ def app_data_dir() -> Path:
 APP_DIR = app_data_dir()
 SETTINGS_PATH = APP_DIR / "settings.json"
 LOG_PATH = APP_DIR / "helper.log"
+NATIVE_LOG_PATH = APP_DIR / "native-host.log"
 
 
 def configure_logging() -> None:
@@ -90,10 +88,10 @@ def acquire_single_instance() -> Any:
 def signal_existing_instance() -> bool:
     if os.name != "nt":
         return False
-    EVENT_MODIFY_STATE = 0x0002
+    event_modify_state = 0x0002
     kernel32 = _kernel32()
     for _ in range(15):
-        handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
+        handle = kernel32.OpenEventW(event_modify_state, False, SHOW_EVENT_NAME)
         if handle:
             try:
                 return bool(kernel32.SetEvent(handle))
@@ -109,8 +107,7 @@ def load_settings() -> dict[str, Any]:
         "seller_id": "",
         "marketplace_id": "ATVPDKIKX0DER",
         "region": "NA",
-        "port": DEFAULT_PORT,
-        "browser_paired_at": "",
+        "client_secret_saved_at": "",
     }
     if not SETTINGS_PATH.exists():
         return defaults
@@ -129,8 +126,7 @@ def save_settings(settings: dict[str, Any]) -> None:
         "seller_id": str(settings.get("seller_id", "")).strip(),
         "marketplace_id": str(settings.get("marketplace_id", "ATVPDKIKX0DER")).strip(),
         "region": str(settings.get("region", "NA")).strip().upper(),
-        "port": int(settings.get("port", DEFAULT_PORT)),
-        "browser_paired_at": str(settings.get("browser_paired_at", "")).strip(),
+        "client_secret_saved_at": str(settings.get("client_secret_saved_at", "")).strip(),
     }
     temp = SETTINGS_PATH.with_suffix(".tmp")
     temp.write_text(json.dumps(public, indent=2), encoding="utf-8")
@@ -152,13 +148,13 @@ def set_secret(name: str, value: str) -> None:
             pass
 
 
-def get_bridge_token() -> str:
-    token = get_secret("bridge_token")
-    if token:
-        return token
-    token = secrets.token_urlsafe(32)
-    keyring.set_password(SERVICE_NAME, "bridge_token", token)
-    return token
+def remove_legacy_bridge_secret() -> None:
+    try:
+        keyring.delete_password(SERVICE_NAME, "bridge_token")
+    except keyring.errors.PasswordDeleteError:
+        pass
+    except Exception:
+        logging.exception("Could not remove legacy localhost bridge token")
 
 
 def configured(settings: dict[str, Any] | None = None) -> bool:
@@ -227,10 +223,46 @@ def version_tuple(version: str) -> tuple[int, int, int]:
     return values[0], values[1], values[2]
 
 
+def native_host_registered() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        key_path = rf"Software\Mozilla\NativeMessagingHosts\{NATIVE_HOST_NAME}"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+            manifest_path, _ = winreg.QueryValueEx(key, None)
+        manifest = Path(str(manifest_path))
+        if not manifest.is_file():
+            return False
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        return payload.get("name") == NATIVE_HOST_NAME
+    except (OSError, ImportError, AttributeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def lwa_rotation_status(settings: dict[str, Any] | None = None) -> tuple[str, int | None]:
+    settings = settings or load_settings()
+    raw = str(settings.get("client_secret_saved_at", "")).strip()
+    if not raw:
+        return "Rotation date unknown", None
+    try:
+        saved = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if saved.tzinfo is None:
+            saved = saved.replace(tzinfo=timezone.utc)
+        age_days = max(0, (datetime.now(timezone.utc) - saved.astimezone(timezone.utc)).days)
+    except ValueError:
+        return "Rotation date unknown", None
+    remaining = 180 - age_days
+    if remaining <= 0:
+        return f"Rotation overdue by {-remaining} days", remaining
+    if remaining <= 30:
+        return f"Rotate within {remaining} days", remaining
+    return f"{remaining} days remaining", remaining
+
+
 def find_firefox_executable() -> Path | None:
     if os.name != "nt":
         return None
-
     try:
         import winreg
         key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
@@ -277,6 +309,7 @@ def open_firefox_target(target: str) -> bool:
         logging.exception("Could not launch Firefox")
         return False
 
+
 def make_tray_image() -> Image.Image:
     image = Image.new("RGBA", (64, 64), (25, 29, 36, 255))
     draw = ImageDraw.Draw(image)
@@ -290,14 +323,11 @@ class HelperApp:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
-        self.httpd: ThreadingHTTPServer | None = None
-        self.server_thread: threading.Thread | None = None
-        self.current_client: SpApiClient | None = None
         self.settings_window: tk.Toplevel | None = None
         self.status_window: tk.Toplevel | None = None
         self.status_label: ttk.Label | None = None
         self.status_vars: dict[str, tk.StringVar] = {}
-        self.status = "Not configured"
+        self.status = "Ready · native messaging" if configured() else "Not configured"
         self.update_status = "Not checked"
         self._quitting = False
         self.activation_event: Any = None
@@ -311,7 +341,6 @@ class HelperApp:
                 pystray.MenuItem("Status…", self._tray_status, default=True),
                 pystray.MenuItem("Settings…", self._tray_settings),
                 pystray.MenuItem("Test Amazon connection", self._tray_test),
-                pystray.MenuItem("Pair browser extension…", self._tray_pair),
                 pystray.MenuItem("Install Firefox extension…", self._tray_firefox, visible=self._xpi_available),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Create diagnostics bundle…", self._tray_diagnostics),
@@ -323,7 +352,7 @@ class HelperApp:
         )
         self.tray.run_detached()
         if configured():
-            self.start_server()
+            self.root.after(1200, self._maybe_warn_lwa_rotation)
         if show_configure or not configured():
             self.root.after(150, self.show_settings)
 
@@ -361,9 +390,6 @@ class HelperApp:
     def _tray_test(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.test_amazon_async)
 
-    def _tray_pair(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        self.root.after(0, self.start_browser_pairing)
-
     def _tray_firefox(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.install_firefox_extension)
 
@@ -396,100 +422,10 @@ class HelperApp:
             self.status_label.configure(text=status)
         self.refresh_status_window()
 
-    def stop_server(self) -> None:
-        server = self.httpd
-        self.httpd = None
-        self.current_client = None
-        if server is not None:
-            try:
-                server.shutdown()
-                server.server_close()
-            except Exception:
-                logging.exception("Could not stop bridge")
-
-    def start_server(self) -> bool:
-        self.stop_server()
-        try:
-            settings = load_settings()
-            cfg = make_spapi_config(settings)
-            port = int(settings.get("port", DEFAULT_PORT))
-            client = SpApiClient(cfg)
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-            server.spapi_client = client  # type: ignore[attr-defined]
-            server.bridge_token = get_bridge_token()  # type: ignore[attr-defined]
-            server.pairing_code = None  # type: ignore[attr-defined]
-            server.pairing_expires_at = 0.0  # type: ignore[attr-defined]
-            server.pairing_callback = self._browser_paired_from_server  # type: ignore[attr-defined]
-            thread = threading.Thread(target=server.serve_forever, name="spapi-bridge", daemon=True)
-            thread.start()
-            self.httpd = server
-            self.current_client = client
-            self.server_thread = thread
-            self.set_status(f"Running on 127.0.0.1:{port}")
-            logging.info("Bridge started on port %s", port)
-            return True
-        except OSError as exc:
-            logging.exception("Bridge could not start")
-            if self.local_health_ok():
-                self.set_status("Already running")
-                return True
-            self.set_status(f"Bridge error: {exc}")
-            return False
-        except Exception as exc:
-            logging.exception("Bridge could not start")
-            self.set_status(f"Setup needed: {exc}")
-            return False
-
-    def local_health_payload(self) -> dict[str, Any]:
-        settings = load_settings()
-        port = int(settings.get("port", DEFAULT_PORT))
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/health",
-            headers={"User-Agent": f"GateKeepa/{APP_VERSION}"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=1.5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-                return payload if isinstance(payload, dict) else {}
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
-            return {}
-
-    def local_health_ok(self) -> bool:
-        return bool(self.local_health_payload().get("ok"))
-
-    def start_browser_pairing(self) -> None:
-        if not self.httpd:
-            if not configured():
-                messagebox.showinfo(
-                    APP_NAME,
-                    "Configure the Amazon connection first so the local helper can start.",
-                    parent=self.settings_window if self.settings_window else self.root,
-                )
-                self.show_settings()
-                return
-            if not self.start_server():
-                return
-        assert self.httpd is not None
-        code = secrets.token_urlsafe(24)
-        self.httpd.pairing_code = code  # type: ignore[attr-defined]
-        self.httpd.pairing_expires_at = time.time() + 120  # type: ignore[attr-defined]
-        port = int(load_settings().get("port", DEFAULT_PORT))
-        url = f"http://127.0.0.1:{port}/pair#code={urllib.parse.quote(code)}"
-        logging.info("Browser pairing window opened for 120 seconds")
-        if not open_firefox_target(url):
-            logging.warning("Firefox executable not found; opening pairing URL with the default browser")
-            webbrowser.open(url)
-        self.notify("Browser pairing opened. Complete it within two minutes.")
-
-    def _browser_paired_from_server(self) -> None:
-        def complete() -> None:
-            settings = load_settings()
-            settings["browser_paired_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            save_settings(settings)
-            logging.info("Browser extension paired with localhost bridge")
-            self.notify("Browser extension paired successfully.")
-            self.refresh_status_window()
-        self.root.after(0, complete)
+    def _maybe_warn_lwa_rotation(self) -> None:
+        text, remaining = lwa_rotation_status()
+        if remaining is not None and remaining <= 30:
+            self.notify(f"Amazon LWA client secret: {text}. Rotate it in Seller Central and save the new secret in Gate Keepa.")
 
     def show_status(self) -> None:
         if self.status_window and self.status_window.winfo_exists():
@@ -511,8 +447,8 @@ class HelperApp:
         )
         fields = [
             ("Version", "version"), ("Helper", "helper"), ("Amazon", "amazon"),
-            ("Bridge", "bridge"), ("Marketplace", "marketplace"), ("Seller", "seller"),
-            ("Browser pairing", "pairing"), ("Updates", "updates"),
+            ("Transport", "transport"), ("Marketplace", "marketplace"), ("Seller", "seller"),
+            ("LWA secret", "lwa_rotation"), ("Updates", "updates"),
         ]
         self.status_vars = {key: tk.StringVar(value="…") for _, key in fields}
         for row, (label, key) in enumerate(fields, start=1):
@@ -522,7 +458,6 @@ class HelperApp:
         buttons.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         ttk.Button(buttons, text="Refresh", command=self.refresh_status_window).pack(side="left", padx=(0, 6))
         ttk.Button(buttons, text="Test Amazon", command=self.test_amazon_async).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Pair browser", command=self.start_browser_pairing).pack(side="left", padx=6)
         ttk.Button(buttons, text="Diagnostics", command=self.create_diagnostics_bundle).pack(side="left", padx=6)
         ttk.Button(buttons, text="Check updates", command=lambda: self.check_updates_async(True)).pack(side="left", padx=6)
         self.refresh_status_window()
@@ -540,17 +475,15 @@ class HelperApp:
         if not self.status_vars:
             return
         settings = load_settings()
-        health = self.local_health_payload()
-        port = int(settings.get("port", DEFAULT_PORT))
-        paired = str(settings.get("browser_paired_at", "")).strip()
+        rotation, _remaining = lwa_rotation_status(settings)
         values = {
             "version": APP_VERSION,
             "helper": self.status,
             "amazon": "Configured" if configured(settings) else "Setup incomplete",
-            "bridge": f"Online on 127.0.0.1:{port}" if health.get("ok") else "Offline",
+            "transport": "Firefox Native Messaging" if native_host_registered() else "Native host not registered",
             "marketplace": marketplace_name(str(settings.get("marketplace_id", ""))),
-            "seller": health.get("sellerIdMasked") or mask_value(str(settings.get("seller_id", ""))),
-            "pairing": f"Paired {paired}" if paired else "Not paired yet",
+            "seller": mask_value(str(settings.get("seller_id", ""))),
+            "lwa_rotation": rotation,
             "updates": self.update_status,
         }
         for key, value in values.items():
@@ -579,14 +512,14 @@ class HelperApp:
         ttk.Label(
             outer,
             text="One-time setup. Paste the values from your private Amazon SP-API app.\n"
-                 "The client secret, refresh token, and localhost bridge token are stored in Windows Credential Manager.",
+                 "The client secret and refresh token are stored in Windows Credential Manager.\n"
+                 "Firefox uses Native Messaging; Gate Keepa does not open a localhost HTTP port.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 14))
         client_id_var = tk.StringVar(value=str(values.get("client_id", "")))
         client_secret_var = tk.StringVar(value=get_secret("client_secret"))
         refresh_var = tk.StringVar(value=get_secret("refresh_token"))
         seller_var = tk.StringVar(value=str(values.get("seller_id", "")))
         marketplace_var = tk.StringVar(value=str(values.get("marketplace_id", "ATVPDKIKX0DER")))
-        port_var = tk.StringVar(value=str(values.get("port", DEFAULT_PORT)))
         row = 2
         fields = [
             ("Client ID", client_id_var, False), ("Client secret", client_secret_var, True),
@@ -604,10 +537,8 @@ class HelperApp:
             values=["ATVPDKIKX0DER", "A2EUQ1WTGCTBG2", "A1F83G8C2ARO7P"],
         ).grid(row=row, column=1, columnspan=2, sticky="ew", pady=5)
         row += 1
-        ttk.Label(outer, text="Local port").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
-        ttk.Entry(outer, textvariable=port_var, width=12).grid(row=row, column=1, sticky="w", pady=5)
         ttk.Button(outer, text="Amazon setup instructions", command=lambda: webbrowser.open(AMAZON_SETUP_DOCS)).grid(
-            row=row, column=2, sticky="e", pady=5
+            row=row, column=0, columnspan=3, sticky="w", pady=5
         )
         row += 1
         ttk.Separator(outer).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(12, 10))
@@ -621,38 +552,39 @@ class HelperApp:
 
         def save_and_connect() -> None:
             try:
-                port = int(port_var.get().strip())
-                if not (1024 <= port <= 65535):
-                    raise ValueError("Port must be between 1024 and 65535.")
                 existing = load_settings()
+                new_secret = client_secret_var.get().strip()
+                previous_secret = get_secret("client_secret")
+                saved_at = str(existing.get("client_secret_saved_at", "")).strip()
+                if new_secret and (new_secret != previous_secret or not saved_at):
+                    saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 settings = {
                     "client_id": client_id_var.get(),
                     "seller_id": seller_var.get(),
                     "marketplace_id": marketplace_var.get(),
                     "region": "EU" if marketplace_var.get() == "A1F83G8C2ARO7P" else "NA",
-                    "port": port,
-                    "browser_paired_at": existing.get("browser_paired_at", ""),
+                    "client_secret_saved_at": saved_at,
                 }
                 save_settings(settings)
-                set_secret("client_secret", client_secret_var.get())
+                set_secret("client_secret", new_secret)
                 set_secret("refresh_token", refresh_var.get())
+                remove_legacy_bridge_secret()
                 if not configured(settings):
                     raise ValueError("Fill in all Amazon fields first.")
-                if self.start_server():
-                    self.notify("Helper is running. Testing Amazon authorization…")
-                    self.test_amazon_async()
+                self.set_status("Ready · native messaging")
+                self.notify("Amazon settings saved. Testing authorization…")
+                self.test_amazon_async()
             except Exception as exc:
                 messagebox.showerror(APP_NAME, str(exc), parent=window)
 
         ttk.Button(buttons, text="Status", command=self.show_status).grid(row=0, column=0, padx=(0, 4))
         ttk.Button(buttons, text="Save & connect", command=save_and_connect).grid(row=0, column=1, padx=4)
         ttk.Button(buttons, text="Test Amazon", command=self.test_amazon_async).grid(row=0, column=2, padx=4)
-        ttk.Button(buttons, text="Pair browser", command=self.start_browser_pairing).grid(row=0, column=3, padx=4)
         if self._xpi_path().exists():
             ttk.Button(buttons, text="Install Firefox extension", command=self.install_firefox_extension).grid(
-                row=0, column=4, padx=4
+                row=0, column=3, padx=4
             )
-        ttk.Button(buttons, text="Hide", command=window.withdraw).grid(row=0, column=5, padx=(12, 0))
+        ttk.Button(buttons, text="Hide", command=window.withdraw).grid(row=0, column=4, padx=(12, 0))
         window.update_idletasks()
         width = window.winfo_reqwidth()
         height = window.winfo_reqheight()
@@ -669,21 +601,22 @@ class HelperApp:
             self.set_status("Amazon setup is incomplete")
             return
         self.set_status("Testing Amazon authorization…")
+
         def worker() -> None:
             try:
-                client = self.current_client or SpApiClient(make_spapi_config())
+                client = SpApiClient(make_spapi_config())
                 client.access_token()
             except Exception as exc:
                 logging.exception("Amazon authorization test failed")
                 self.root.after(0, lambda: self._amazon_test_done(False, str(exc)))
             else:
                 self.root.after(0, lambda: self._amazon_test_done(True, ""))
+
         threading.Thread(target=worker, name="amazon-test", daemon=True).start()
 
     def _amazon_test_done(self, ok: bool, error: str) -> None:
         if ok:
-            port = int(load_settings().get("port", DEFAULT_PORT))
-            self.set_status(f"Amazon connected · helper online on port {port}")
+            self.set_status("Amazon connected · native messaging ready")
             self.notify("Amazon connection verified.")
         else:
             self.set_status("Amazon authorization failed")
@@ -719,9 +652,9 @@ class HelperApp:
                 except Exception:
                     pass
             settings = load_settings()
-            health = self.local_health_payload()
             now = datetime.now(timezone.utc)
             path = APP_DIR / f"GateKeepa-Diagnostics-{now.strftime('%Y%m%d-%H%M%SZ')}.zip"
+            rotation, remaining = lwa_rotation_status(settings)
             diagnostics = {
                 "generatedAt": now.isoformat(timespec="seconds"),
                 "app": {"name": APP_NAME, "version": APP_VERSION},
@@ -737,15 +670,17 @@ class HelperApp:
                     "marketplaceId": str(settings.get("marketplace_id", "")),
                     "marketplace": marketplace_name(str(settings.get("marketplace_id", ""))),
                     "region": str(settings.get("region", "")),
-                    "port": int(settings.get("port", DEFAULT_PORT)),
-                    "browserPairedAt": str(settings.get("browser_paired_at", "")),
+                    "clientSecretSavedAt": str(settings.get("client_secret_saved_at", "")),
                 },
                 "credentialsPresent": {
                     "clientSecret": bool(get_secret("client_secret")),
                     "refreshToken": bool(get_secret("refresh_token")),
-                    "bridgeToken": bool(get_secret("bridge_token")),
                 },
-                "bridgeHealth": health,
+                "nativeMessaging": {
+                    "registered": native_host_registered(),
+                    "host": NATIVE_HOST_NAME,
+                },
+                "lwaSecretRotation": {"status": rotation, "daysRemaining": remaining},
                 "currentStatus": self.status,
                 "updateStatus": self.update_status,
             }
@@ -753,6 +688,8 @@ class HelperApp:
                 archive.writestr("diagnostics.json", json.dumps(diagnostics, indent=2, ensure_ascii=False))
                 if LOG_PATH.exists():
                     archive.write(LOG_PATH, arcname="helper.log")
+                if NATIVE_LOG_PATH.exists():
+                    archive.write(NATIVE_LOG_PATH, arcname="native-host.log")
             logging.info("Diagnostics bundle created: %s", path)
             try:
                 os.startfile(APP_DIR)  # type: ignore[attr-defined]
@@ -760,7 +697,7 @@ class HelperApp:
                 pass
             messagebox.showinfo(
                 APP_NAME,
-                f"Diagnostics bundle created:\n\n{path}\n\nNo Amazon secrets or localhost bridge token are included.",
+                f"Diagnostics bundle created:\n\n{path}\n\nNo Amazon secrets are included.",
                 parent=self.status_window if self.status_window else self.root,
             )
         except Exception as exc:
@@ -770,6 +707,7 @@ class HelperApp:
     def check_updates_async(self, show_no_update: bool = False) -> None:
         self.update_status = "Checking…"
         self.refresh_status_window()
+
         def worker() -> None:
             try:
                 request = urllib.request.Request(
@@ -795,6 +733,7 @@ class HelperApp:
                 self.root.after(0, lambda: self._update_check_done(None, show_no_update, str(exc)))
             else:
                 self.root.after(0, lambda: self._update_check_done(latest, show_no_update, ""))
+
         threading.Thread(target=worker, name="update-check", daemon=True).start()
 
     def _update_check_done(
@@ -837,7 +776,6 @@ class HelperApp:
         if self._quitting:
             return
         self._quitting = True
-        self.stop_server()
         if self.activation_event and os.name == "nt":
             try:
                 kernel32 = _kernel32()
@@ -865,6 +803,7 @@ def main() -> int:
     parser.add_argument("--smoke-test", action="store_true")
     args, _ = parser.parse_known_args()
     configure_logging()
+    remove_legacy_bridge_secret()
     if args.smoke_test:
         logging.info("%s %s smoke test passed imports", APP_NAME, APP_VERSION)
         return 0

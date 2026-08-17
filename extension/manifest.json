@@ -1,20 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Gate Keepa",
-  "version": "0.2.2",
-  "description": "Local-first Keepa/Amazon sourcing overlays: eligibility, gating, bookmarks, notes, history, cost files and more.",
+  "version": "0.2.3",
+  "description": "Local-first Keepa/Amazon sourcing overlays with seller-specific listing eligibility.",
   "permissions": [
-    "storage"
+    "storage",
+    "nativeMessaging"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*",
     "https://keepa.com/*",
     "https://*.keepa.com/*",
     "https://www.amazon.com/*",
     "https://www.amazon.co.uk/*",
-    "https://www.amazon.ca/*",
-    "https://api.github.com/*"
+    "https://www.amazon.ca/*"
   ],
   "background": {
     "scripts": [
@@ -35,10 +33,6 @@
       "data_collection_permissions": {
         "required": [
           "websiteContent"
-        ],
-        "optional": [
-          "authenticationInfo",
-          "browsingActivity"
         ]
       }
     }
@@ -70,16 +64,6 @@
       ],
       "css": [
         "content/styles.css"
-      ],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "http://127.0.0.1/*",
-        "http://localhost/*"
-      ],
-      "js": [
-        "content/pair.js"
       ],
       "run_at": "document_idle"
     }

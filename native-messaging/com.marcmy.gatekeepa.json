@@ -1,0 +1,9 @@
+{
+  "name": "com.marcmy.gatekeepa",
+  "description": "Gate Keepa SP-API native messaging host",
+  "path": "GateKeepaNativeHost.exe",
+  "type": "stdio",
+  "allowed_extensions": [
+    "sourcing-cockpit@marcmy.github.io"
+  ]
+}
