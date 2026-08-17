@@ -1,0 +1,153 @@
+name: Remove fee estimator from Gate Keepa migration
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out migration branch
+        uses: actions/checkout@v7
+        with:
+          ref: migration/gate-keepa
+          fetch-depth: 0
+
+      - name: Remove Product Fees functionality
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def edit(path, fn):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              new = fn(text)
+              if new == text:
+                  print(f"No change: {path}")
+              else:
+                  p.write_text(new, encoding="utf-8")
+                  print(f"Updated: {path}")
+
+          def server(text):
+              text = text.replace("import math\n", "")
+              text = text.replace(
+                  '    "ATVPDKIKX0DER": {"region": "NA", "currency": "USD"},  # US\n'
+                  '    "A2EUQ1WTGCTBG2": {"region": "NA", "currency": "CAD"},  # Canada\n'
+                  '    "A1F83G8C2ARO7P": {"region": "EU", "currency": "GBP"},  # United Kingdom\n',
+                  '    "ATVPDKIKX0DER": {"region": "NA"},  # US\n'
+                  '    "A2EUQ1WTGCTBG2": {"region": "NA"},  # Canada\n'
+                  '    "A1F83G8C2ARO7P": {"region": "EU"},  # United Kingdom\n'
+              )
+              text = text.replace(
+                  "        # Amazon's documented defaults are 5 rps for Listings Restrictions and\n"
+                  "        # 1 rps for getMyFeesEstimateForASIN. Stay slightly below each limit.\n"
+                  "        self._restrictions_gate = RateGate(0.21)\n"
+                  "        self._fees_gate = RateGate(1.02)\n",
+                  "        # Stay slightly below Amazon's documented default rate for Listings Restrictions.\n"
+                  "        self._restrictions_gate = RateGate(0.21)\n"
+              )
+              text = re.sub(
+                  r'\n    def fee_estimate\(.*?\n\ndef _amazon_error_message',
+                  '\n\ndef _amazon_error_message',
+                  text,
+                  flags=re.S,
+              )
+              text = text.replace(
+                  '            if parsed.path == "/eligibility":\n'
+                  '                self._eligibility(body)\n'
+                  '            elif parsed.path == "/fees":\n'
+                  '                self._fees(body)\n'
+                  '            else:\n',
+                  '            if parsed.path == "/eligibility":\n'
+                  '                self._eligibility(body)\n'
+                  '            else:\n'
+              )
+              text = re.sub(
+                  r'\n    def _fees\(self, body: dict\[str, Any\]\) -> None:.*?\n\ndef main\(\)',
+                  '\n\ndef main()',
+                  text,
+                  flags=re.S,
+              )
+              return text
+
+          def background(text):
+              return re.sub(
+                  r'\n    case "FEE_ESTIMATE": \{.*?\n    case "GIST_PUSH":',
+                  '\n    case "GIST_PUSH":',
+                  text,
+                  flags=re.S,
+              )
+
+          def amazon(text):
+              text = re.sub(
+                  r'\n    <div class="sc-line">\n      <label>Price .*?</div>',
+                  '',
+                  text,
+                  flags=re.S,
+              )
+              text = re.sub(
+                  r'\n  panel\.querySelector\("#sc-fee"\)\.addEventListener\("click", async \(\) => \{.*?\n  \}\);\n\n  const status',
+                  '\n\n  const status',
+                  text,
+                  flags=re.S,
+              )
+              return text
+
+          def readme(text):
+              text = text.replace("- Optional SP-API fee estimate lookup\n", "")
+              text = text.replace(
+                  "- US / Canada / UK marketplace-aware Amazon links, Keepa links and fee currencies\n",
+                  "- US / Canada / UK marketplace-aware Amazon and Keepa links\n",
+              )
+              text = text.replace(
+                  "The private app needs the **Product Listing** role for seller-specific Listings Restrictions checks. If the optional fee estimator will be used, also grant the **Pricing** role required by Amazon's Product Fees workflow.",
+                  "The private app needs only the **Product Listing** role for Gate Keepa's seller-specific Listings Restrictions checks. Gate Keepa does not call the Product Fees API and does not require the Pricing role.",
+              )
+              text = text.replace(
+                  "- Eligibility and fee POST endpoints require the paired bridge token in addition to the existing extension-origin checks.\n",
+                  "- The eligibility POST endpoint requires the paired bridge token in addition to the existing extension-origin checks.\n",
+              )
+              return text
+
+          def matrix(text):
+              text = text.replace(
+                  "| Amazon product page tools | Implemented | Eligibility, bookmark, note, Keepa jump, fees |\n",
+                  "| Amazon product page tools | Implemented | Eligibility, bookmark, note, Keepa jump |\n",
+              )
+              text = re.sub(r'^\| Product fee estimate \|.*\n', '', text, flags=re.M)
+              return text
+
+          edit("bridge/server.py", server)
+          edit("extension/background.js", background)
+          edit("extension/content/amazon.js", amazon)
+          edit("README.md", readme)
+          edit("FEATURE_MATRIX.md", matrix)
+
+          # Guard against accidentally retaining Product Fees API behavior or instructions.
+          forbidden = {
+              "bridge/server.py": ["fee_estimate", 'parsed.path == "/fees"', "_fees_gate", "PriceToEstimateFees"],
+              "extension/background.js": ['case "FEE_ESTIMATE"'],
+              "extension/content/amazon.js": ["sc-fee", "FEE_ESTIMATE"],
+          }
+          for path, needles in forbidden.items():
+              text = Path(path).read_text(encoding="utf-8")
+              for needle in needles:
+                  if needle in text:
+                      raise SystemExit(f"Fee-removal validation failed: {needle!r} remains in {path}")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bridge/server.py extension/background.js extension/content/amazon.js README.md FEATURE_MATRIX.md
+          if git diff --cached --quiet; then
+            echo "No scope cleanup changes needed."
+            exit 0
+          fi
+          git commit -m "Remove Product Fees and Pricing scope"
+          git push origin HEAD:migration/gate-keepa
