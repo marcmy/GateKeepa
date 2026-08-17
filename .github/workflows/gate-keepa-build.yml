@@ -1,0 +1,91 @@
+name: Gate Keepa Build
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-keepa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install helper build dependencies
+        run: python -m pip install -r requirements-helper.txt
+
+      - name: Validate Python and bridge tests
+        shell: pwsh
+        run: |
+          python -m py_compile helper.py
+          python -m py_compile bridge/server.py
+          Push-Location bridge
+          python -m unittest test_server.py
+          Pop-Location
+
+      - name: Verify restriction-only SP-API scope
+        shell: pwsh
+        run: |
+          $server = Get-Content bridge/server.py -Raw
+          $background = Get-Content extension/background.js -Raw
+          $amazon = Get-Content extension/content/amazon.js -Raw
+          foreach ($needle in @('fee_estimate', 'PriceToEstimateFees', 'parsed.path == "/fees"', '_fees_gate')) {
+            if ($server.Contains($needle)) { throw "Product Fees functionality remains in bridge: $needle" }
+          }
+          if ($background.Contains('case "FEE_ESTIMATE"')) { throw 'Product Fees functionality remains in extension background.' }
+          if ($amazon.Contains('FEE_ESTIMATE') -or $amazon.Contains('sc-fee')) { throw 'Product Fees UI remains on Amazon content page.' }
+
+      - name: Build standalone helper
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean GateKeepa.spec
+          if (-not (Test-Path dist/GateKeepa.exe)) { throw 'GateKeepa.exe was not produced.' }
+
+      - name: Smoke-test frozen helper
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath (Join-Path $PWD 'dist/GateKeepa.exe') -ArgumentList '--smoke-test' -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Gate Keepa helper exited with code $($process.ExitCode)." }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Validate extension JavaScript
+        shell: pwsh
+        run: |
+          Get-ChildItem extension -Recurse -Filter *.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($_.FullName)" }
+          }
+
+      - name: Lint Firefox extension
+        shell: pwsh
+        run: npx --yes web-ext@10 lint --source-dir extension
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $known = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path $known)) { choco install innosetup --no-progress -y }
+
+      - name: Build Windows installer without signed XPI
+        shell: pwsh
+        run: |
+          $match = Select-String -Path helper.py -Pattern '^APP_VERSION = "([^"]+)"$'
+          $version = $match.Matches[0].Groups[1].Value
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          & $iscc "/DMyAppVersion=$version" "/DRepoRoot=$PWD" "installer/GateKeepa.iss"
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup build failed.' }
