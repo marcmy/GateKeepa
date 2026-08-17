@@ -20,13 +20,14 @@ This project deliberately does **not** copy SourceLens code, assets, guides, or 
 - Heuristic meltable / hazmat flags
 - Similar-product / rabbit-trail search helpers
 - Amazon product-page panel
-- Optional SP-API fee estimate lookup
-- US / Canada / UK marketplace-aware Amazon links, Keepa links and fee currencies
+- US / Canada / UK marketplace-aware Amazon and Keepa links
 - Pomodoro sourcing timer
 - Optional team sync through a GitHub Gist
 - Firefox + Chromium Manifest V3 background support
 - One-click browser-to-helper pairing with a random localhost bridge token
 - Helper status screen, diagnostics bundle creation, and update checks
+
+Gate Keepa intentionally does **not** estimate Amazon selling fees or profitability. That functionality is outside this project's scope.
 
 ## Normal Windows setup — intended for Doug
 
@@ -41,7 +42,7 @@ The packaged build is designed so the user does **not** need Python, PowerShell,
    - Seller ID
 4. Click **Save & connect**. The helper verifies Login with Amazon authorization and then stays in the Windows notification area.
 5. Install the bundled Mozilla-signed Firefox add-on when prompted.
-6. In the helper choose **Pair browser**. A localhost page opens and the installed extension completes a one-time pairing automatically. The pairing window expires after two minutes.
+6. In the helper choose **Pair browser**. Gate Keepa prefers Firefox explicitly for the pairing page; if Firefox cannot be located it falls back to the Windows default browser. The one-time pairing window expires after two minutes.
 7. Open Keepa and use it normally.
 
 After first setup the helper starts automatically with Windows and runs the Amazon bridge on localhost. Launching Gate Keepa again brings the existing instance's settings window forward rather than starting a duplicate helper.
@@ -50,11 +51,11 @@ After first setup the helper starts automatically with Windows and runs the Amaz
 
 For a private SP-API application Amazon requires self-authorization. The helper deliberately does not attempt to automate or bypass Amazon's developer authorization process. Once Amazon has issued the values above, they are entered once through the GUI.
 
-The private app needs the **Product Listing** role for seller-specific Listings Restrictions checks. If the optional fee estimator will be used, also grant the **Pricing** role required by Amazon's Product Fees workflow.
+Gate Keepa needs only the **Product Listing** role for seller-specific Listings Restrictions checks. It does **not** call Amazon's Product Fees API and does **not** require the **Pricing** role.
 
 ### Firefox signing
 
-Release/Beta Firefox requires Mozilla signing for normally installed extensions. The repository now has the AMO signing credentials configured and the first unlisted Mozilla signing/approval run completed successfully. CI signs the Firefox package before creating the end-user installer.
+Release/Beta Firefox requires Mozilla signing for normally installed extensions. The repository has AMO signing credentials configured, and release builds can obtain an unlisted Mozilla signature before creating the end-user installer.
 
 The signing job allows up to 60 minutes for Mozilla approval so a normal validation queue does not cause a false CI failure.
 
@@ -80,7 +81,7 @@ Diagnostics deliberately contain only masked IDs and booleans indicating whether
 - The Amazon client secret and refresh token are stored through Windows Credential Manager using `keyring`.
 - A random localhost bridge token is also stored in Windows Credential Manager.
 - The browser extension receives that bridge token only through a short-lived one-time pairing flow and stores it in extension-local storage.
-- Eligibility and fee POST endpoints require the paired bridge token in addition to the existing extension-origin checks.
+- The eligibility POST endpoint requires the paired bridge token in addition to the existing extension-origin checks.
 - Non-secret Amazon settings live under `%LOCALAPPDATA%\SourcingCockpit`.
 - The helper binds the SP-API bridge to `127.0.0.1` only.
 - The bridge rejects ordinary website origins and browser CORS preflights so random web pages cannot spend the seller's Amazon API quota through localhost.
@@ -107,9 +108,9 @@ Direct developer mode remains backwards-compatible without helper-managed bridge
 
 ## Build and artifacts
 
-`.github/workflows/gate-keepa-build.yml` validates the Python and JavaScript, runs bridge unit tests, builds `GateKeepa.exe`, smoke-tests the frozen executable, stages/lints/packages the Firefox extension, obtains an unlisted Mozilla signature when AMO credentials are available, builds the per-user Windows installer, and uploads separate end-user and developer artifacts.
+`.github/workflows/gate-keepa-build.yml` validates the Python and JavaScript, runs bridge unit tests, verifies that Product Fees functionality has not been reintroduced, builds `GateKeepa.exe`, smoke-tests the frozen executable, stages/lints/packages the Firefox extension, optionally obtains an unlisted Mozilla signature for release builds, builds the per-user Windows installer, and uploads developer/release artifacts as appropriate.
 
-The end-user artifact contains only:
+A signed end-user artifact contains only:
 
 - `GateKeepa-Setup-X.Y.Z.exe`
 - `SHA256.txt`
