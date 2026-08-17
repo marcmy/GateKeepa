@@ -1,9 +1,6 @@
 (async () => {
   const SC = globalThis.SourcingCockpit;
-  const ids = [
-    "bridgeUrl", "marketplaceId", "conditionType", "cacheTtlHours",
-    "autoScan", "gistSyncEnabled", "gistId", "gistToken"
-  ];
+  const ids = ["marketplaceId", "conditionType", "cacheTtlHours", "autoScan"];
 
   const response = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
   const settings = response?.settings || {};
@@ -14,40 +11,7 @@
     else el.value = settings[id] ?? "";
   }
 
-  async function ensureFirefoxGistConsent() {
-    const firefoxPermissions = globalThis.browser?.permissions;
-    if (!firefoxPermissions?.request) return true;
-
-    const request = {
-      data_collection: ["authenticationInfo", "browsingActivity"]
-    };
-
-    try {
-      if (firefoxPermissions.contains && await firefoxPermissions.contains(request)) return true;
-      return Boolean(await firefoxPermissions.request(request));
-    } catch (error) {
-      console.warn("Could not request Firefox Gist-sync consent", error);
-      return false;
-    }
-  }
-
-  document.querySelector("#gistSyncEnabled").addEventListener("change", async e => {
-    if (!e.target.checked) return;
-    const granted = await ensureFirefoxGistConsent();
-    if (!granted) {
-      e.target.checked = false;
-      alert("Firefox permission was not granted, so Gist sync will stay disabled.");
-    }
-  });
-
   document.querySelector("#save").addEventListener("click", async () => {
-    if (document.querySelector("#gistSyncEnabled").checked) {
-      const granted = await ensureFirefoxGistConsent();
-      if (!granted) {
-        document.querySelector("#gistSyncEnabled").checked = false;
-      }
-    }
-
     const patch = {};
     for (const id of ids) {
       const el = document.getElementById(id);
@@ -63,8 +27,8 @@
     out.textContent = "Checking…";
     const result = await chrome.runtime.sendMessage({ type: "BRIDGE_HEALTH" });
     out.textContent = result?.ok
-      ? `Online · seller ${result.health?.sellerIdMasked || "configured"}`
-      : (result?.error || "Offline");
+      ? `Native host ready · seller ${result.health?.sellerIdMasked || "configured"}`
+      : (result?.error || "Native host unavailable");
   });
 
   document.querySelector("#costFile").addEventListener("change", async e => {
