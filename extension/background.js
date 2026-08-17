@@ -1,21 +1,31 @@
 const DEFAULTS = {
-  bridgeUrl: "http://127.0.0.1:8765",
-  bridgeToken: "",
   marketplaceId: "ATVPDKIKX0DER",
   conditionType: "used_good",
   cacheTtlHours: 168,
-  autoScan: true,
-  gistSyncEnabled: false,
-  gistId: "",
-  gistToken: ""
+  autoScan: true
 };
 
+const NATIVE_HOST = "com.marcmy.gatekeepa";
 const inflight = new Map();
 let storageMutationQueue = Promise.resolve();
+let nativePort = null;
+let nativeSequence = 0;
+const nativePending = new Map();
+
+function normalizedSettings(stored = {}) {
+  return {
+    marketplaceId: String(stored.marketplaceId || DEFAULTS.marketplaceId),
+    conditionType: String(stored.conditionType ?? DEFAULTS.conditionType),
+    cacheTtlHours: Math.max(1, Number(stored.cacheTtlHours) || DEFAULTS.cacheTtlHours),
+    autoScan: stored.autoScan === undefined ? DEFAULTS.autoScan : Boolean(stored.autoScan)
+  };
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.local.get("settings");
-  await chrome.storage.local.set({ settings: { ...DEFAULTS, ...(stored.settings || {}) } });
+  // Deliberately rewrite only supported keys. This removes legacy localhost
+  // bridge tokens/URLs and the old optional Gist token from browser storage.
+  await chrome.storage.local.set({ settings: normalizedSettings(stored.settings || {}) });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -43,13 +53,13 @@ async function mutateStorageKey(key, fallback, mutator) {
 
 async function getSettings() {
   const { settings = {} } = await chrome.storage.local.get("settings");
-  return { ...DEFAULTS, ...settings };
+  return normalizedSettings(settings);
 }
 
 async function setSettings(patch) {
   return serializedStorage(async () => {
     const { settings: stored = {} } = await chrome.storage.local.get("settings");
-    const settings = { ...DEFAULTS, ...stored, ...patch };
+    const settings = normalizedSettings({ ...stored, ...(patch || {}) });
     await chrome.storage.local.set({ settings });
     return settings;
   });
@@ -64,35 +74,56 @@ async function storageSet(key, value) {
   return serializedStorage(() => chrome.storage.local.set({ [key]: value }));
 }
 
+function ensureNativePort() {
+  if (nativePort) return nativePort;
+
+  const port = chrome.runtime.connectNative(NATIVE_HOST);
+  nativePort = port;
+
+  port.onMessage.addListener(message => {
+    const id = message?.id;
+    if (!nativePending.has(id)) return;
+    const pending = nativePending.get(id);
+    nativePending.delete(id);
+    clearTimeout(pending.timer);
+    pending.resolve(message?.response || { ok: false, error: "Native host returned an empty response" });
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (nativePort === port) nativePort = null;
+    const error = new Error("Gate Keepa native host disconnected. Reinstall or repair Gate Keepa if this persists.");
+    for (const pending of nativePending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    nativePending.clear();
+  });
+
+  return port;
+}
+
+function nativeRequest(request, timeoutMs = 40000) {
+  return new Promise((resolve, reject) => {
+    const id = `${Date.now().toString(36)}-${(++nativeSequence).toString(36)}`;
+    const timer = setTimeout(() => {
+      nativePending.delete(id);
+      reject(new Error("Gate Keepa native host timed out"));
+    }, timeoutMs);
+
+    nativePending.set(id, { resolve, reject, timer });
+    try {
+      ensureNativePort().postMessage({ id, request });
+    } catch (error) {
+      clearTimeout(timer);
+      nativePending.delete(id);
+      nativePort = null;
+      reject(error);
+    }
+  });
+}
+
 function cacheKey(asin, marketplaceId, conditionType) {
   return `${marketplaceId}|${conditionType || ""}|${asin}`;
-}
-
-function bridgeHeaders(settings, json = false) {
-  const headers = {};
-  if (json) headers["Content-Type"] = "application/json";
-  if (settings.bridgeToken) headers["X-Sourcing-Cockpit-Token"] = settings.bridgeToken;
-  return headers;
-}
-
-async function pairBridge(bridgeUrl, code) {
-  const cleanUrl = String(bridgeUrl || "").replace(/\/$/, "");
-  if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(cleanUrl)) {
-    throw new Error("Pairing page is not a local Gate Keepa helper URL");
-  }
-  if (!code) throw new Error("Pairing code is missing");
-
-  const response = await fetch(`${cleanUrl}/pair`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code })
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok || !payload.token) {
-    throw new Error(payload.error || `Pairing failed with HTTP ${response.status}`);
-  }
-  await setSettings({ bridgeUrl: cleanUrl, bridgeToken: String(payload.token) });
-  return { bridgeUrl: cleanUrl };
 }
 
 async function checkEligibility(asin, force = false, marketplaceOverride = null) {
@@ -111,26 +142,19 @@ async function checkEligibility(asin, force = false, marketplaceOverride = null)
   if (inflight.has(key)) return inflight.get(key);
 
   const promise = (async () => {
-    if (!settings.bridgeToken) {
-      throw new Error("Browser extension is not paired. Use Pair browser from the Gate Keepa tray app.");
-    }
-    const response = await fetch(`${settings.bridgeUrl.replace(/\/$/, "")}/eligibility`, {
-      method: "POST",
-      headers: bridgeHeaders(settings, true),
-      body: JSON.stringify({
-        asins: [asin],
-        marketplaceIds: [marketplaceId],
-        conditionType: settings.conditionType || null
-      })
+    const payload = await nativeRequest({
+      type: "eligibility",
+      asins: [asin],
+      marketplaceIds: [marketplaceId],
+      conditionType: settings.conditionType || null
     });
 
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.ok) {
-      throw new Error(payload.error || `Bridge returned HTTP ${response.status}`);
+    if (!payload?.ok) {
+      throw new Error(payload?.error || "Native host eligibility request failed");
     }
 
     const item = payload.results?.[asin];
-    if (!item) throw new Error(`Bridge returned no result for ${asin}`);
+    if (!item) throw new Error(`Native host returned no result for ${asin}`);
 
     const entry = { ...item, asin, marketplaceId, cachedAt: Date.now(), source: "live" };
     await mutateStorageKey("eligibilityCache", {}, current => {
@@ -204,93 +228,6 @@ async function upsertGatingObservation(observation) {
   });
 }
 
-async function hasFirefoxGistConsent() {
-  const permissionsApi = globalThis.browser?.permissions;
-  if (!permissionsApi?.getAll) return true;
-
-  const permissions = await permissionsApi.getAll();
-  if (!Object.prototype.hasOwnProperty.call(permissions, "data_collection")) return true;
-  const granted = new Set(permissions.data_collection || []);
-  return granted.has("authenticationInfo") && granted.has("browsingActivity");
-}
-
-async function gistRequest(method, path, body) {
-  const settings = await getSettings();
-  if (!settings.gistToken) throw new Error("Gist token is not configured");
-  if (!(await hasFirefoxGistConsent())) {
-    throw new Error("Firefox data-sharing permission for Gist sync is not granted");
-  }
-
-  const response = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      "Accept": "application/vnd.github+json",
-      "Authorization": `Bearer ${settings.gistToken}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...(body ? { "Content-Type": "application/json" } : {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.message || `GitHub HTTP ${response.status}`);
-  return payload;
-}
-
-async function snapshotSyncState() {
-  const state = await chrome.storage.local.get(["gatingDb", "bookmarks", "notes", "costs"]);
-  return {
-    schema: 1,
-    exportedAt: new Date().toISOString(),
-    gatingDb: state.gatingDb || {},
-    bookmarks: state.bookmarks || {},
-    notes: state.notes || {},
-    costs: state.costs || {}
-  };
-}
-
-async function gistPush() {
-  const settings = await getSettings();
-  if (!settings.gistSyncEnabled) throw new Error("Gist sync is disabled");
-  const content = JSON.stringify(await snapshotSyncState(), null, 2);
-  let gistId = settings.gistId;
-
-  if (!gistId) {
-    const created = await gistRequest("POST", "/gists", {
-      description: "Gate Keepa team sync",
-      public: false,
-      files: { "sourcing-cockpit.json": { content } }
-    });
-    gistId = created.id;
-    await setSettings({ gistId });
-  } else {
-    await gistRequest("PATCH", `/gists/${encodeURIComponent(gistId)}`, {
-      files: { "sourcing-cockpit.json": { content } }
-    });
-  }
-  return { gistId };
-}
-
-async function gistPull() {
-  const settings = await getSettings();
-  if (!settings.gistSyncEnabled || !settings.gistId) throw new Error("Gist sync is not configured");
-  const gist = await gistRequest("GET", `/gists/${encodeURIComponent(settings.gistId)}`);
-  const file = gist.files?.["sourcing-cockpit.json"];
-  if (!file?.content) throw new Error("Gist does not contain sourcing-cockpit.json");
-  const remote = JSON.parse(file.content);
-  if (remote.schema !== 1) throw new Error(`Unsupported sync schema ${remote.schema}`);
-
-  await serializedStorage(async () => {
-    const local = await chrome.storage.local.get(["gatingDb", "bookmarks", "notes", "costs"]);
-    await chrome.storage.local.set({
-      gatingDb: { ...(local.gatingDb || {}), ...(remote.gatingDb || {}) },
-      bookmarks: { ...(local.bookmarks || {}), ...(remote.bookmarks || {}) },
-      notes: { ...(local.notes || {}), ...(remote.notes || {}) },
-      costs: { ...(local.costs || {}), ...(remote.costs || {}) }
-    });
-  });
-  return { pulledAt: Date.now() };
-}
-
 async function handleMessage(message) {
   switch (message?.type) {
     case "GET_SETTINGS":
@@ -298,9 +235,6 @@ async function handleMessage(message) {
 
     case "SET_SETTINGS":
       return { ok: true, settings: await setSettings(message.patch || {}) };
-
-    case "PAIR_BRIDGE":
-      return { ok: true, ...(await pairBridge(message.bridgeUrl, message.code)) };
 
     case "CHECK_ELIGIBILITY":
       return {
@@ -337,24 +271,14 @@ async function handleMessage(message) {
       return { ok: true };
 
     case "BRIDGE_HEALTH": {
-      const settings = await getSettings();
-      const response = await fetch(`${settings.bridgeUrl.replace(/\/$/, "")}/health`, {
-        headers: bridgeHeaders(settings)
-      });
-      const payload = await response.json().catch(() => ({}));
+      const health = await nativeRequest({ type: "ping" }, 10000);
       return {
-        ok: response.ok && payload.ok,
-        health: payload,
-        paired: Boolean(settings.bridgeToken),
-        error: response.ok ? payload.error : `HTTP ${response.status}`
+        ok: Boolean(health?.ok && health?.configured),
+        health,
+        transport: "native-messaging",
+        error: health?.ok && health?.configured ? "" : (health?.error || "Amazon setup is incomplete")
       };
     }
-
-    case "GIST_PUSH":
-      return { ok: true, ...(await gistPush()) };
-
-    case "GIST_PULL":
-      return { ok: true, ...(await gistPull()) };
 
     default:
       throw new Error(`Unknown message type: ${message?.type}`);
