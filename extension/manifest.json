@@ -1,0 +1,87 @@
+{
+  "manifest_version": 3,
+  "name": "Gate Keepa",
+  "version": "0.2.2",
+  "description": "Local-first Keepa/Amazon sourcing overlays: eligibility, gating, bookmarks, notes, history, cost files and more.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://keepa.com/*",
+    "https://*.keepa.com/*",
+    "https://www.amazon.com/*",
+    "https://www.amazon.co.uk/*",
+    "https://www.amazon.ca/*",
+    "https://api.github.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "lib/common.js",
+      "background.js"
+    ],
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Gate Keepa",
+    "default_popup": "popup/popup.html"
+  },
+  "options_page": "options/options.html",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sourcing-cockpit@marcmy.github.io",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "websiteContent"
+        ],
+        "optional": [
+          "authenticationInfo",
+          "browsingActivity"
+        ]
+      }
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://keepa.com/*",
+        "https://*.keepa.com/*"
+      ],
+      "js": [
+        "lib/common.js",
+        "content/keepa.js"
+      ],
+      "css": [
+        "content/styles.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.amazon.com/*",
+        "https://www.amazon.co.uk/*",
+        "https://www.amazon.ca/*"
+      ],
+      "js": [
+        "lib/common.js",
+        "content/amazon.js"
+      ],
+      "css": [
+        "content/styles.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "content/pair.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

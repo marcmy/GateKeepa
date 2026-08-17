@@ -2,6 +2,7 @@ name: Gate Keepa Build
 
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,6 +14,11 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+      SHOULD_SIGN: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -21,15 +27,34 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-helper.txt
+
+      - name: Read and validate application version
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path helper.py -Pattern '^APP_VERSION = "([^"]+)"$'
+          if (-not $match) { throw 'Could not read APP_VERSION from helper.py.' }
+          $version = $match.Matches[0].Groups[1].Value
+          $manifest = Get-Content extension/manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $version) {
+            throw "Version mismatch: helper=$version extension=$($manifest.version)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Gate Keepa version: $version"
 
       - name: Install helper build dependencies
         run: python -m pip install -r requirements-helper.txt
 
-      - name: Validate Python and bridge tests
-        shell: pwsh
+      - name: Compile Python sources
         run: |
           python -m py_compile helper.py
           python -m py_compile bridge/server.py
+
+      - name: Run bridge unit tests
+        shell: pwsh
+        run: |
           Push-Location bridge
           python -m unittest test_server.py
           Pop-Location
@@ -50,20 +75,25 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean GateKeepa.spec
-          if (-not (Test-Path dist/GateKeepa.exe)) { throw 'GateKeepa.exe was not produced.' }
+          if (-not (Test-Path dist/GateKeepa.exe)) {
+            throw 'GateKeepa.exe was not produced.'
+          }
 
       - name: Smoke-test frozen helper
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath (Join-Path $PWD 'dist/GateKeepa.exe') -ArgumentList '--smoke-test' -PassThru -Wait
-          if ($process.ExitCode -ne 0) { throw "Gate Keepa helper exited with code $($process.ExitCode)." }
+          $exe = Join-Path $PWD 'dist/GateKeepa.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen Gate Keepa helper exited with code $($process.ExitCode)."
+          }
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "22"
 
-      - name: Validate extension JavaScript
+      - name: Validate Chromium extension JavaScript
         shell: pwsh
         run: |
           Get-ChildItem extension -Recurse -Filter *.js | ForEach-Object {
@@ -71,21 +101,103 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($_.FullName)" }
           }
 
-      - name: Lint Firefox extension
+      - name: Stage Firefox Promise-API build
         shell: pwsh
-        run: npx --yes web-ext@10 lint --source-dir extension
+        run: |
+          $source = Join-Path $PWD 'extension'
+          $firefox = Join-Path $PWD 'build/firefox-src'
+          Remove-Item $firefox -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item $firefox -ItemType Directory -Force | Out-Null
+          Copy-Item "$source/*" $firefox -Recurse -Force
+
+          Get-ChildItem $firefox -Recurse -Filter *.js | ForEach-Object {
+            $text = Get-Content $_.FullName -Raw
+            $text = $text.Replace('chrome.', 'browser.')
+            Set-Content $_.FullName $text -Encoding utf8NoBOM
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Firefox JavaScript transform failed: $($_.FullName)" }
+          }
+
+      - name: Lint and package Firefox extension
+        id: firefox
+        shell: pwsh
+        run: |
+          $source = Join-Path $PWD 'build/firefox-src'
+          $out = Join-Path $PWD 'build/firefox'
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item $out -ItemType Directory -Force | Out-Null
+
+          npx --yes web-ext@10 lint --source-dir $source
+          if ($LASTEXITCODE -ne 0) { throw 'web-ext lint failed.' }
+
+          npx --yes web-ext@10 build --source-dir $source --artifacts-dir $out --overwrite-dest
+          if ($LASTEXITCODE -ne 0) { throw 'web-ext build failed.' }
+
+          if ($env:SHOULD_SIGN -eq 'true' -and $env:AMO_JWT_ISSUER -and $env:AMO_JWT_SECRET) {
+            npx --yes web-ext@10 sign `
+              --source-dir $source `
+              --artifacts-dir $out `
+              --channel unlisted `
+              --approval-timeout 3600000 `
+              --api-key $env:AMO_JWT_ISSUER `
+              --api-secret $env:AMO_JWT_SECRET
+            if ($LASTEXITCODE -ne 0) { throw 'Mozilla signing failed.' }
+
+            $signed = Get-ChildItem $out -Filter *.xpi | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $signed) { throw 'Mozilla signing succeeded but no XPI was downloaded.' }
+            Copy-Item $signed.FullName (Join-Path $out 'GateKeepa.xpi') -Force
+            'signed=true' >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host 'Mozilla signing skipped for this run; producing developer artifacts only.'
+            'signed=false' >> $env:GITHUB_OUTPUT
+          }
 
       - name: Install Inno Setup
         shell: pwsh
         run: |
           $known = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
-          if (-not (Test-Path $known)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $known)) {
+            choco install innosetup --no-progress -y
+          }
 
-      - name: Build Windows installer without signed XPI
+      - name: Build Windows installer
         shell: pwsh
         run: |
-          $match = Select-String -Path helper.py -Pattern '^APP_VERSION = "([^"]+)"$'
-          $version = $match.Matches[0].Groups[1].Value
+          $version = '${{ steps.version.outputs.version }}'
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found.' }
           & $iscc "/DMyAppVersion=$version" "/DRepoRoot=$PWD" "installer/GateKeepa.iss"
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup build failed.' }
+
+      - name: Prepare end-user release package
+        if: steps.firefox.outputs.signed == 'true'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $release = Join-Path $PWD 'dist/release'
+          Remove-Item $release -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item $release -ItemType Directory -Force | Out-Null
+          $installerName = "GateKeepa-Setup-$version.exe"
+          $installer = Join-Path $PWD "dist/installer/$installerName"
+          if (-not (Test-Path $installer)) { throw "Installer not found: $installer" }
+          Copy-Item $installer (Join-Path $release $installerName)
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $installerName" | Set-Content (Join-Path $release 'SHA256.txt') -Encoding ascii
+
+      - name: Upload end-user release
+        if: steps.firefox.outputs.signed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: GateKeepa-Windows-${{ steps.version.outputs.version }}
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: Upload developer artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: GateKeepa-Developer-${{ steps.version.outputs.version }}
+          path: |
+            dist/GateKeepa.exe
+            dist/installer/GateKeepa-Setup-${{ steps.version.outputs.version }}.exe
+            build/firefox/*
+          if-no-files-found: error
