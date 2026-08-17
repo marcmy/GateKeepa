@@ -2,4 +2,4 @@
 
 Amazon + Keepa sourcing and seller-eligibility companion.
 
-Bootstrap migration trigger.
+Bootstrap migration trigger (retry).
