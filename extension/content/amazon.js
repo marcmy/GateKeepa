@@ -15,7 +15,7 @@
   const panel = document.createElement("section");
   panel.id = "sc-amazon-panel";
   panel.innerHTML = `
-    <div class="sc-panel-title">Gate Keepa · ${asin}</div>
+    <div class="sc-panel-title">Gate Keepa · <span id="sc-amz-asin"></span></div>
     <div class="sc-line"><span class="sc-badge" data-status="UNKNOWN" id="sc-amz-status">checking…</span></div>
     <div class="sc-line">
       <button class="sc-mini" id="sc-amz-keepa">Open Keepa</button>
@@ -26,6 +26,7 @@
       <textarea id="sc-note" placeholder="Local note for this ASIN"></textarea>
     </div>
   `;
+  panel.querySelector("#sc-amz-asin").textContent = asin;
   document.documentElement.appendChild(panel);
 
   panel.querySelector("#sc-amz-keepa").addEventListener("click", () => {
