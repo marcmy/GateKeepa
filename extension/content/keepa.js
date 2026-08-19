@@ -49,7 +49,7 @@
     if (titleLink?.href) {
       try {
         const host = new URL(titleLink.href, location.href).hostname.toLowerCase();
-        if (host.endsWith("amazon.com") || host.endsWith("amazon.ca") || host.endsWith("amazon.co.uk")) {
+        if (SC.isAmazonHostname(host)) {
           return SC.marketplaceFromHostname(host);
         }
       } catch (_) {}

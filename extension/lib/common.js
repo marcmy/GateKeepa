@@ -50,10 +50,19 @@
     return MARKETPLACES[marketplaceId] || MARKETPLACES.ATVPDKIKX0DER;
   }
 
+  function isAmazonHostname(hostname) {
+    const host = String(hostname || "").toLowerCase();
+    return (
+      host === "amazon.com" || host.endsWith(".amazon.com") ||
+      host === "amazon.ca" || host.endsWith(".amazon.ca") ||
+      host === "amazon.co.uk" || host.endsWith(".amazon.co.uk")
+    );
+  }
+
   function marketplaceFromHostname(hostname = location.hostname) {
     const host = String(hostname || "").toLowerCase();
-    if (host.endsWith("amazon.co.uk")) return "A1F83G8C2ARO7P";
-    if (host.endsWith("amazon.ca")) return "A2EUQ1WTGCTBG2";
+    if (host === "amazon.co.uk" || host.endsWith(".amazon.co.uk")) return "A1F83G8C2ARO7P";
+    if (host === "amazon.ca" || host.endsWith(".amazon.ca")) return "A2EUQ1WTGCTBG2";
     return "ATVPDKIKX0DER";
   }
 
@@ -97,6 +106,7 @@
     normalizeAsin,
     asinFromUrl,
     marketplaceInfo,
+    isAmazonHostname,
     marketplaceFromHostname,
     csvEscape,
     downloadCsv,
