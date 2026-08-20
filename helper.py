@@ -388,7 +388,7 @@ class HelperApp:
     def _tray_status(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.show_status)
 
-    def _tray_settings(self, _icon: pystray.MenuItem, _item: pystray.MenuItem) -> None:
+    def _tray_settings(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.show_settings)
 
     def _tray_test(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
