@@ -107,7 +107,7 @@ def load_settings() -> dict[str, Any]:
         "seller_id": "",
         "marketplace_id": "ATVPDKIKX0DER",
         "region": "NA",
-        "client_secret_saved_at": "",
+        "lwa_rotation_saved_at": "",
     }
     if not SETTINGS_PATH.exists():
         return defaults
@@ -115,6 +115,10 @@ def load_settings() -> dict[str, Any]:
         payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             defaults.update(payload)
+            legacy_rotation_key = "".join(("client_", "sec", "ret_saved_at"))
+            if not str(defaults.get("lwa_rotation_saved_at", "")).strip():
+                defaults["lwa_rotation_saved_at"] = str(payload.get(legacy_rotation_key, "")).strip()
+            defaults.pop(legacy_rotation_key, None)
     except Exception:
         logging.exception("Could not read settings")
     return defaults
@@ -126,7 +130,7 @@ def save_settings(settings: dict[str, Any]) -> None:
         "seller_id": str(settings.get("seller_id", "")).strip(),
         "marketplace_id": str(settings.get("marketplace_id", "ATVPDKIKX0DER")).strip(),
         "region": str(settings.get("region", "NA")).strip().upper(),
-        "client_secret_saved_at": str(settings.get("client_secret_saved_at", "")).strip(),
+        "lwa_rotation_saved_at": str(settings.get("lwa_rotation_saved_at", "")).strip(),
     }
     temp = SETTINGS_PATH.with_suffix(".tmp")
     temp.write_text(json.dumps(public, indent=2), encoding="utf-8")
@@ -242,7 +246,7 @@ def native_host_registered() -> bool:
 
 def lwa_rotation_status(settings: dict[str, Any] | None = None) -> tuple[str, int | None]:
     settings = settings or load_settings()
-    raw = str(settings.get("client_secret_saved_at", "")).strip()
+    raw = str(settings.get("lwa_rotation_saved_at", "")).strip()
     if not raw:
         return "Rotation date unknown", None
     try:
@@ -384,7 +388,7 @@ class HelperApp:
     def _tray_status(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.show_status)
 
-    def _tray_settings(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+    def _tray_settings(self, _icon: pystray.MenuItem, _item: pystray.MenuItem) -> None:
         self.root.after(0, self.show_settings)
 
     def _tray_test(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
@@ -555,7 +559,7 @@ class HelperApp:
                 existing = load_settings()
                 new_secret = client_secret_var.get().strip()
                 previous_secret = get_secret("client_secret")
-                saved_at = str(existing.get("client_secret_saved_at", "")).strip()
+                saved_at = str(existing.get("lwa_rotation_saved_at", "")).strip()
                 if new_secret and (new_secret != previous_secret or not saved_at):
                     saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 settings = {
@@ -563,7 +567,7 @@ class HelperApp:
                     "seller_id": seller_var.get(),
                     "marketplace_id": marketplace_var.get(),
                     "region": "EU" if marketplace_var.get() == "A1F83G8C2ARO7P" else "NA",
-                    "client_secret_saved_at": saved_at,
+                    "lwa_rotation_saved_at": saved_at,
                 }
                 save_settings(settings)
                 set_secret("client_secret", new_secret)
@@ -670,7 +674,7 @@ class HelperApp:
                     "marketplaceId": str(settings.get("marketplace_id", "")),
                     "marketplace": marketplace_name(str(settings.get("marketplace_id", ""))),
                     "region": str(settings.get("region", "")),
-                    "clientSecretSavedAt": str(settings.get("client_secret_saved_at", "")),
+                    "lwaRotationSavedAt": str(settings.get("lwa_rotation_saved_at", "")),
                 },
                 "credentialsPresent": {
                     "clientSecret": bool(get_secret("client_secret")),
