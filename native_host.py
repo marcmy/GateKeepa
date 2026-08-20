@@ -49,7 +49,6 @@ def load_settings() -> dict[str, Any]:
         "seller_id": "",
         "marketplace_id": "ATVPDKIKX0DER",
         "region": "NA",
-        "client_secret_saved_at": "",
     }
     if not SETTINGS_PATH.exists():
         return defaults
